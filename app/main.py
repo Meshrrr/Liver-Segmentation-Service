@@ -40,7 +40,10 @@ async def upload_files(file: UploadFile = File()):
     file_id = str(uuid.uuid4())
 
     # Сохраняем файл в папку uploads (решение на время)
-    file_path = UPLOAD_DIRECTION / f"{file_id}.upload"
+    if file_ext == ".nii.gz":
+        file_path = UPLOAD_DIRECTION / f"{file_id}.nii.gz"
+    elif file_ext == ".nii":
+        file_path = UPLOAD_DIRECTION / f"{file_id}.nii"
 
     content = await file.read()
     with open(file_path, "wb") as f:
