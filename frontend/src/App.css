@@ -1,0 +1,83 @@
+body {
+    background-color: rgba(65, 63, 72, 1);
+    font-family: "Inter", Arial, Helvetica, sans-serif;
+}
+
+button {
+    border: none;
+    cursor: pointer;
+}
+
+h1, h2, p {
+    margin: 0;
+}
+
+:root {
+    --border-r: 26px;
+    --text-font: 16px;
+    --text-color: #fff;
+    --dark-color: rgba(65, 63, 72, 1);
+}
+
+.container {
+    width: 750px;
+    margin: 0 auto;
+}
+
+.main-title-box {
+    display: flex;
+    justify-content: center;
+    padding: 20px 0;
+    background-color: rgba(65, 63, 72, 1);
+}
+
+.main-title {
+    font-size: 16px;
+    text-align: center;
+    color: var(--text-color);
+    border: 3px dashed var(--text-color);
+    border-radius: var(--border-r);
+    padding: 18px 36px;
+    background-color: rgba(52, 49, 63, 1);
+}
+
+.model-space {
+    width: 100%;
+    height: 500px;
+    background-color: rgba(35, 33, 41, 1);
+    margin-bottom: 50px;
+}
+
+.tool-btns {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+#upload-box label {
+    cursor: pointer;
+    width: 250px;
+    padding: 10px 50px;
+    font-size: var(--text-font);
+    border-radius: var(--border-r);
+    border: 1px solid rgba(40, 40, 48, 0.84);
+    background-color: rgba(40, 40, 48, 0.84);
+    color: var(--text-color);
+}
+
+#upload-box label:hover {
+    border: 1px solid #fff;
+}
+
+#upload-box div {
+    position: relative;
+    z-index: 10;
+}
+
+#upload-box input[type=file] {
+    width: 0.1px;
+    height: 0.1px;
+    opacity: 0;
+    position: absolute;
+    z-index: -10;
+}
