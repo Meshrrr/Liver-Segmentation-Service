@@ -1,14 +1,28 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException, Query
+from fastapi import FastAPI, UploadFile, File, HTTPException, Query, Request, Form
 from typing import Optional
 import os
 from pathlib import Path
 import uuid
 from datetime import datetime
 import shutil
+import io
+import base64
+import sys
+
+print(f"=== SERVER STARTED ===")
+print(f"Python path: {sys.executable}")
+print(f"CWD: {os.getcwd()}")
+print(f"Python files location: {__file__}")
+print(f"Files in cwd: {os.listdir('.')}")
+print(f"========================")
+
+from fastapi.middleware.cors import CORSMiddleware
 
 import torch
 import nibabel as nib
 import numpy as np
+from PIL import Image
+from scipy.ndimage import zoom
 
 from app.schemas import (
     HealthCheck,
@@ -38,23 +52,30 @@ from app.models.inference import LiverSegmentationModel, load_model
 
 # Глобальная переменная для модели
 segmentation_model: Optional[LiverSegmentationModel] = None
-MODEL_CHECKPOINT = "checkpoints/best_model.pth"
+MODEL_CHECKPOINT = Path(__file__).parent.parent / "checkpoints" / "best_model.pth"
 
 def get_segmentation_model() -> Optional[LiverSegmentationModel]:
     global segmentation_model
 
     if segmentation_model is None:
         import os
-        if os.path.exists(MODEL_CHECKPOINT):
+        checkpoint_path = MODEL_CHECKPOINT
+
+        print(f"Попытка загрузить модель из: {checkpoint_path}")
+        print(f"Файл существует: {checkpoint_path.exists()}")
+
+        if checkpoint_path.exists():
             try:
                 device = "cuda" if torch.cuda.is_available() else "cpu"
-                segmentation_model = load_model(MODEL_CHECKPOINT, device=device)
+                segmentation_model = load_model(str(checkpoint_path), device=device)
                 print(f"✓ Модель сегментации загружена на устройство: {device}")
             except Exception as e:
                 print(f"Ошибка загрузки модели: {e}")
+                import traceback
+                traceback.print_exc()
                 segmentation_model = None
         else:
-            print(f"Модель не найдена: {MODEL_CHECKPOINT}. Сначала обучите модель.")
+            print(f"Модель не найдена: {checkpoint_path}")
 
     return segmentation_model
 
@@ -64,6 +85,15 @@ app = FastAPI(
     version="0.2.0",
     docs_url="/api/docs",
     redoc_url="/api/redoc",
+)
+
+# Настройки CORS для разрешения запросов с фронтенда
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 UPLOAD_DIR = Path("uploads")
@@ -166,61 +196,95 @@ async def health_check():
 
 
 @app.post(
-    "/upload", response_model=UploadResponse, responses={400: {"model": ErrorResponse}}
+    "/upload/folder",
+    responses={400: {"model": ErrorResponse}},
+    name="upload_folder"
 )
-async def upload_medical_file(file: UploadFile = File(...)):
+async def upload_dicom_folder(request: Request):
+    """
+    Загрузка нескольких DICOM файлов (папки/серии).
 
+    Принимает multipart/form-data с несколькими файлами под ключом 'files'.
+    """
+    # Получаем все файлы из request
     try:
-        try:
-            file_type = get_file_type(file.filename)
-        except ValueError as e:
-            raise HTTPException(
-                status_code=400,
-                detail={
-                    "detail": str(e),
-                    "error_code": "INVALID_FILE_TYPE",
-                    "supported_formats": [
-                        "DICOM (.dcm, .dicom)",
-                        "NIfTI (.nii, .nii.gz)",
-                    ],
-                },
-            )
-
-        file_id = str(uuid.uuid4())
-
-        file_path = save_uploaded_file(file, file_id, file_type)
-
-        file_size = os.path.getsize(file_path)
-
-        dicom_metadata = None
-        is_dicom_series = False
-
-        if file_type == FileType.DICOM:
-            metadata, is_series = process_dicom_file(file_path)
-            dicom_metadata = metadata
-            is_dicom_series = is_series
-
-        return UploadResponse(
-            message=f"{file_type.value.upper()} файл успешно загружен",
-            file_id=file_id,
-            filename=file.filename,
-            file_type=file_type,
-            file_size_bytes=file_size,
-            file_size_mb=format_file_size(file_size),
-            dicom_metadata=dicom_metadata,
-            is_dicom_series=is_dicom_series,
-        )
-
-    except HTTPException:
-        raise
+        form = await request.form()
+        # Правильно получаем все файлы с ключом 'files'
+        file_list = form.getlist('files')
     except Exception as e:
         raise HTTPException(
-            status_code=500,
+            status_code=400,
             detail={
-                "detail": f"Ошибка при загрузке файла: {str(e)}",
-                "error_code": "UPLOAD_ERROR",
+                "detail": f"Ошибка при чтении формы: {str(e)}",
+                "error_code": "FORM_PARSE_ERROR",
             },
         )
+
+    print(f"Получено файлов: {len(file_list)}")
+
+    if not file_list:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "detail": "Файлы не предоставлены",
+                "error_code": "NO_FILES",
+            },
+        )
+
+    # Генерируем общий ID для всей серии
+    series_id = str(uuid.uuid4())
+    uploaded_files = []
+    errors = []
+    total_size = 0
+
+    # Загружаем каждый файл
+    for idx, file in enumerate(file_list):
+        if idx % 20 == 0:
+            print(f"Обработка файла {idx + 1}/{len(file_list)}")
+        try:
+            file_type = get_file_type(file.filename)
+            if file_type != FileType.DICOM:
+                continue
+
+            # Используем оригинальное имя для идентификации среза
+            file_id = Path(file.filename).stem
+
+            file_path = save_uploaded_file(file, file_id, file_type)
+            file_size = os.path.getsize(file_path)
+            total_size += file_size
+
+            uploaded_files.append({
+                "file_id": file_id,
+                "filename": file.filename,
+                "size_mb": format_file_size(file_size)
+            })
+
+        except Exception as e:
+            errors.append(f"{file.filename}: {str(e)}")
+
+    # Проверяем, что загружены файлы
+    if not uploaded_files:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "detail": "Не удалось загрузить ни одного файла",
+                "error_code": "UPLOAD_ERROR",
+                "errors": errors,
+            },
+        )
+
+    # Сортируем по имени (для правильного порядка срезов)
+    uploaded_files.sort(key=lambda x: x["file_id"])
+
+    return {
+        "message": f"Загружено {len(uploaded_files)} DICOM файлов",
+        "series_id": series_id,
+        "total_files": len(uploaded_files),
+        "total_size_mb": format_file_size(total_size),
+        "files": uploaded_files,  # Возвращаем все файлы
+        "errors": errors[:10] if errors else [],
+        "status": "completed"
+    }
 
 
 @app.get(
@@ -553,6 +617,168 @@ async def segment_nifti_file(
                 "error_code": "SEGMENTATION_ERROR",
             },
         )
+
+
+@app.post(
+    "/segment/dicom",
+    responses={400: {"model": ErrorResponse}, 500: {"model": ErrorResponse}},
+)
+async def segment_dicom_series(
+    series_id: str = Query(..., description="ID серии DICOM файлов"),
+    target_size_d: int = Query(64, description="Целевая глубина для модели"),
+    target_size_h: int = Query(128, description="Целевая высота для модели"),
+    target_size_w: int = Query(128, description="Целевая ширина для модели"),
+):
+    """
+    Сегментация печени на DICOM серии.
+
+    Собирает все DICOM файлы серии в 3D объём,
+    применяет 3D U-Net модель и возвращает маски срезов.
+    """
+    import pydicom
+
+    # Получаем все DICOM файлы
+    dicom_files = sorted(DICOM_DIR.glob("*.dcm"))
+
+    if not dicom_files:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "detail": "DICOM файлы не найдены",
+                "error_code": "NO_DICOM_FILES",
+            },
+        )
+
+    print(f"Найдено DICOM файлов: {len(dicom_files)}")
+
+    # Читаем первый файл для получения размеров
+    first_dcm = pydicom.dcmread(str(dicom_files[0]))
+    rows = first_dcm.Rows
+    cols = first_dcm.Columns
+
+    # Получаем Rescale параметры
+    rescale_slope = getattr(first_dcm, 'RescaleSlope', 1)
+    rescale_intercept = getattr(first_dcm, 'RescaleIntercept', 0)
+
+    print(f"Размер среза: {rows}x{cols}, всего срезов: {len(dicom_files)}")
+
+    # Собираем 3D объём
+    volume = np.zeros((len(dicom_files), rows, cols), dtype=np.float32)
+
+    for i, dcm_path in enumerate(dicom_files):
+        try:
+            dcm = pydicom.dcmread(str(dcm_path))
+            slice_data = dcm.pixel_array.astype(np.float32)
+
+            # Применяем Rescale
+            slice_data = slice_data * rescale_slope + rescale_intercept
+
+            volume[i] = slice_data
+        except Exception as e:
+            print(f"Ошибка чтения {dcm_path}: {e}")
+            continue
+
+    # Проверяем, что объём не пустой
+    if volume.size == 0:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "detail": "Не удалось собрать объём из DICOM файлов",
+                "error_code": "VOLUME_BUILD_ERROR",
+            },
+        )
+
+    # Получаем модель
+    model = get_segmentation_model()
+
+    if model is None:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "detail": "Модель сегментации недоступна",
+                "error_code": "MODEL_NOT_LOADED",
+            },
+        )
+
+    try:
+        target_size = (target_size_d, target_size_h, target_size_w)
+
+        # Сегментация
+        mask = model.predict_volume(volume, target_size=target_size)
+
+        print(f"Маска получена, форма: {mask.shape}")
+
+        # Статистика
+        liver_voxels = int(mask.sum())
+        total_voxels = int(mask.size)
+        liver_percentage = round(liver_voxels / total_voxels * 100, 2) if total_voxels > 0 else 0
+
+        # Сохраняем результат как NIfTI
+        output_path = UPLOAD_DIR / "segmentation" / f"{series_id}_segmentation.nii.gz"
+        output_path.parent.mkdir(exist_ok=True)
+
+        result_img = nib.Nifti1Image(mask.astype(np.uint8), np.eye(4))
+        nib.save(result_img, str(output_path))
+
+        # Конвертируем маски срезов в base64 для фронтенда
+        slice_masks = []
+        num_slices = min(mask.shape[0], 20)  # Ограничиваем для производительности
+
+        for i in range(0, mask.shape[0], mask.shape[0] // num_slices):
+            if i < mask.shape[0]:
+                slice_mask = mask[i]
+
+                # Масштабируем для отображения если нужно
+                if slice_mask.shape != (rows, cols):
+                    factors = (rows / slice_mask.shape[0], cols / slice_mask.shape[1])
+                    slice_mask = zoom(slice_mask, factors, order=0)
+
+                # Конвертируем в image
+                slice_img = (slice_mask * 255).astype(np.uint8)
+                pil_img = Image.fromarray(slice_img)
+
+                buffered = io.BytesIO()
+                pil_img.save(buffered, format="PNG")
+                img_base64 = base64.b64encode(buffered.getvalue()).decode("ascii")
+
+                slice_masks.append({
+                    "slice_index": i,
+                    "image": f"data:image/png;base64,{img_base64}"
+                })
+
+        return {
+            "series_id": series_id,
+            "status": "completed",
+            "statistics": {
+                "liver_voxels": liver_voxels,
+                "total_voxels": total_voxels,
+                "liver_percentage": liver_percentage,
+                "original_shape": list(volume.shape),
+                "mask_shape": list(mask.shape)
+            },
+            "slices": slice_masks,
+            "message": "Сегментация завершена успешно"
+        }
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "detail": f"Ошибка при сегментации: {str(e)}",
+                "error_code": "SEGMENTATION_ERROR",
+            },
+        )
+
+
+@app.get("/debug/model-path")
+async def debug_model_path():
+    """Отладочный эндпоинт для проверки пути к модели"""
+    checkpoint_path = Path(__file__).parent.parent / "checkpoints" / "best_model.pth"
+    return {
+        "checkpoint_path": str(checkpoint_path),
+        "exists": checkpoint_path.exists(),
+        "cwd": os.getcwd(),
+    }
 
 
 @app.get(
