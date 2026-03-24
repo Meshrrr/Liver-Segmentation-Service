@@ -26,64 +26,81 @@ async function sendFiles(files) {
         return
     }
 
-    try {
-        // Загружаем первый файл для проверки
-        const testFile = dcmFiles[0];
-        const formData = new FormData();
-        formData.append('file', testFile);
+    console.log(`Найдено DICOM файлов: ${dcmFiles.length}`);
 
-        console.log('Загрузка файла...');
-        const uploadResponse = await fetch(`${API_URL}/upload`, {
+    try {
+        // Загружаем все файлы через /upload/folder
+        const formData = new FormData();
+
+        dcmFiles.forEach(file => {
+            formData.append('files', file);
+        });
+
+        console.log('Загрузка файлов на сервер...');
+
+        const uploadResponse = await fetch(`${API_URL}/upload/folder`, {
             method: 'POST',
             body: formData
         });
 
         if (!uploadResponse.ok) {
-            throw new Error('Ошибка загрузки файла');
+            const errorData = await uploadResponse.json();
+            console.error('Ошибка загрузки:', errorData);
+            throw new Error(errorData.detail?.detail || 'Ошибка загрузки файлов');
         }
 
         const uploadData = await uploadResponse.json();
-        console.log('Файл загружен:', uploadData);
-        const fileId = uploadData.file_id;
+        console.log('Файлы загружены:', uploadData);
 
-        // Шаг 2: Получаем метаданные
-        console.log('Получение метаданных...');
-        const metadataResponse = await fetch(`${API_URL}/dicom/${fileId}/metadata`);
-        const metadata = await metadataResponse.json();
-        console.log('Метаданные:', metadata);
+        const seriesId = uploadData.series_id || 'default';
 
-        console.log('Получение срезов...');
-        const slices = [];
+        // Запускаем сегментацию
+        console.log('Запуск сегментации...');
+        alert('Файлы загружены. Запускаю сегментацию печени...');
 
-        const previewResponse = await fetch(
-            `${API_URL}/dicom/${fileId}/preview?window_center=40&window_width=400`
+        const segmentResponse = await fetch(
+            `${API_URL}/segment/dicom?series_id=${seriesId}&target_size_d=64&target_size_h=128&target_size_w=128`,
+            { method: 'POST' }
         );
 
-        if (previewResponse.ok) {
-            const previewData = await previewResponse.json();
-            console.log('Превью получено');
+        if (!segmentResponse.ok) {
+            const errorData = await segmentResponse.json();
+            console.error('Ошибка сегментации:', errorData);
+            throw new Error(errorData.detail?.detail || 'Ошибка сегментации');
+        }
 
-            if (previewData.image) {
+        const segmentData = await segmentResponse.json();
+        console.log('Сегментация завершена:', segmentData);
+
+        // Загружаем маски срезов
+        if (segmentData.slices && segmentData.slices.length > 0) {
+            console.log('Загрузка масок срезов...');
+            const slices = [];
+
+            for (const sliceInfo of segmentData.slices) {
                 const img = new Image();
-                img.src = previewData.image;
+                img.src = sliceInfo.image;
                 await new Promise(resolve => img.onload = resolve);
                 slices.push(img);
             }
-        }
 
-        if (slices.length > 0) {
-            showModel(slices);
-            console.log('Модель отображена');
+            if (slices.length > 0) {
+                showModel(slices);
+                console.log('3D модель построена по маскам сегментации');
+
+                // Показываем статистику
+                const stats = segmentData.statistics;
+                alert(`Сегментация завершена!\nПечень: ${stats.liver_percentage}% объёма\nВокселей печени: ${stats.liver_voxels.toLocaleString()}`);
+            } else {
+                throw new Error('Не удалось получить маски');
+            }
         } else {
-            showModel(dcmFiles.slice(0, 50));
+            throw new Error('Нет масок в ответе');
         }
-
-        alert('Файлы загружены! Модель построена.');
 
     } catch (error) {
         console.error('Ошибка:', error);
-        showModel(dcmFiles.slice(0, 50));
-        alert('Сервер недоступен, показаны локальные файлы');
+        alert('Ошибка: ' + error.message);
     }
 
     return
