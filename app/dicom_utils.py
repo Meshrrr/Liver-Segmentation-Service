@@ -1,3 +1,4 @@
+import pydicom
 from pydicom.dataset import FileDataset
 from typing import Optional, Dict, Any, List, Tuple
 import numpy as np
