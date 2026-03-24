@@ -1,4 +1,3 @@
-import pydicom
 from pydicom.dataset import FileDataset
 from typing import Optional, Dict, Any, List, Tuple
 import numpy as np
@@ -245,9 +244,6 @@ def get_slice_info(dicom_dataset: FileDataset, slice_index: int = 0) -> SliceInf
 
 
 def is_dicom_file(file_path: str) -> bool:
-    """
-    Проверяет, является ли файл DICOM файлом.
-    """
     try:
         if not file_path.lower().endswith((".dcm", ".dicom")):
             return False
