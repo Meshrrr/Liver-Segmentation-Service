@@ -1,29 +1,46 @@
 import * as THREE from 'three';
 
 export function showModel(data) {
-    console.log('Отображение...');
+    console.log('Отображение...', data.length, 'элементов');
 
-    const imagePromises = data.map(file => {
-        return new Promise((resolve) => {
-            const img = new Image();
-            img.onload = () => resolve(img);
-            img.onerror = () => {
-                console.warn(`Не удалось загрузить: ${file.name}`);
-                resolve(null);
-            };
-            img.src = URL.createObjectURL(file);
-        });
-    });
-    
-    Promise.all(imagePromises).then(images => {
-        const validImages = images.filter(img => img !== null);
-        console.log(`Загружено изображений: ${validImages.length}`);
+    // Определяем тип данных: Image объекты или File объекты
+    const isImageArray = data.length > 0 && data[0] instanceof Image;
+
+    if (isImageArray) {
+        // Уже готовые Image объекты (из base64 preview)
+        console.log('Получены Image объекты');
+        const validImages = data.filter(img => img !== null);
 
         const oldCanvas = document.querySelector('canvas');
         if (oldCanvas) oldCanvas.remove();
-        
+
         new SliceViewer3D(validImages);
-    });
+    } else {
+        // File объекты - нужно загрузить через createObjectURL
+        console.log('Получены File объекты, загрузка...');
+
+        const imagePromises = data.map(file => {
+            return new Promise((resolve) => {
+                const img = new Image();
+                img.onload = () => resolve(img);
+                img.onerror = () => {
+                    console.warn(`Не удалось загрузить: ${file.name}`);
+                    resolve(null);
+                };
+                img.src = URL.createObjectURL(file);
+            });
+        });
+
+        Promise.all(imagePromises).then(images => {
+            const validImages = images.filter(img => img !== null);
+            console.log(`Загружено изображений: ${validImages.length}`);
+
+            const oldCanvas = document.querySelector('canvas');
+            if (oldCanvas) oldCanvas.remove();
+
+            new SliceViewer3D(validImages);
+        });
+    }
 }
 
 
