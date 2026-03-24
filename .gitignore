@@ -1,0 +1,55 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+venv_new/
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Модели и данные
+checkpoints/
+Task03_Liver_rs/
+uploads/
+*.nii
+*.nii.gz
+*.dcm
+*.dicom
+
+# Node
+node_modules/
+frontend/build/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*.sublime-*
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Логи
+*.log
+logs/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# TensorBoard
+runs/
+events.out.tfevents.*
+
+# Временные файлы
+*.tmp
+*.bak
+*.cache
