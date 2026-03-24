@@ -1,9 +1,14 @@
 from fastapi import FastAPI, UploadFile, File, HTTPException, Query
+from typing import Optional
 import os
 from pathlib import Path
 import uuid
 from datetime import datetime
 import shutil
+
+import torch
+import nibabel as nib
+import numpy as np
 
 from app.schemas import (
     HealthCheck,
@@ -27,6 +32,31 @@ from app.dicom_utils import (
     get_slice_info,
     is_dicom_file,
 )
+
+# Импорт для сегментации
+from app.models.inference import LiverSegmentationModel, load_model
+
+# Глобальная переменная для модели
+segmentation_model: Optional[LiverSegmentationModel] = None
+MODEL_CHECKPOINT = "checkpoints/best_model.pth"
+
+def get_segmentation_model() -> Optional[LiverSegmentationModel]:
+    global segmentation_model
+
+    if segmentation_model is None:
+        import os
+        if os.path.exists(MODEL_CHECKPOINT):
+            try:
+                device = "cuda" if torch.cuda.is_available() else "cpu"
+                segmentation_model = load_model(MODEL_CHECKPOINT, device=device)
+                print(f"✓ Модель сегментации загружена на устройство: {device}")
+            except Exception as e:
+                print(f"Ошибка загрузки модели: {e}")
+                segmentation_model = None
+        else:
+            print(f"Модель не найдена: {MODEL_CHECKPOINT}. Сначала обучите модель.")
+
+    return segmentation_model
 
 app = FastAPI(
     title="Liver CT Segmentation API",
@@ -430,3 +460,126 @@ async def list_files():
         total_size_mb=round(total_size, 2),
         summary=file_type_count,
     )
+
+
+@app.post(
+    "/segment/nifti/{file_id}",
+    responses={404: {"model": ErrorResponse}, 500: {"model": ErrorResponse}},
+)
+async def segment_nifti_file(
+    file_id: str,
+    target_size_d: int = Query(64, description="Целевая глубина для модели"),
+    target_size_h: int = Query(128, description="Целевая высота для модели"),
+    target_size_w: int = Query(128, description="Целевая ширина для модели"),
+):
+    """
+    Сегментация печени на NIfTI файле.
+
+    Загружает NIfTI файл, применяет 3D U-Net модель и возвращает маску сегментации.
+    """
+    # Поиск файла
+    nifti_path = NIFTI_DIR / f"{file_id}.nii"
+    nifti_gz_path = NIFTI_DIR / f"{file_id}.nii.gz"
+
+    file_path = None
+    if nifti_path.exists():
+        file_path = nifti_path
+    elif nifti_gz_path.exists():
+        file_path = nifti_gz_path
+
+    if not file_path:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "detail": f"NIfTI файл с ID {file_id} не найден",
+                "error_code": "NIFTI_FILE_NOT_FOUND",
+            },
+        )
+
+    # Получаем модель
+    model = get_segmentation_model()
+
+    if model is None:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "detail": "Модель сегментации недоступна. Обучите модель.",
+                "error_code": "MODEL_NOT_LOADED",
+            },
+        )
+
+    try:
+        # Применяем модель
+        target_size = (target_size_d, target_size_h, target_size_w)
+
+        # Загружаем объём
+        img = nib.load(str(file_path))
+        volume = img.get_fdata().astype(np.float32)
+
+        # Сегментация
+        mask = model.predict_volume(volume, target_size=target_size)
+
+        # Сохраняем результат
+        output_path = UPLOAD_DIR / "segmentation" / f"{file_id}_segmentation.nii.gz"
+        output_path.parent.mkdir(exist_ok=True)
+
+        result_img = nib.Nifti1Image(mask.astype(np.uint8), img.affine, img.header)
+        nib.save(result_img, str(output_path))
+
+        # Статистика
+        liver_voxels = int(mask.sum())
+        total_voxels = int(mask.size)
+        liver_percentage = round(liver_voxels / total_voxels * 100, 2) if total_voxels > 0 else 0
+
+        return {
+            "file_id": file_id,
+            "status": "completed",
+            "output_file_id": file_id + "_segmentation",
+            "statistics": {
+                "liver_voxels": liver_voxels,
+                "total_voxels": total_voxels,
+                "liver_percentage": liver_percentage,
+                "original_shape": list(volume.shape),
+                "mask_shape": list(mask.shape)
+            },
+            "message": "Сегментация завершена успешно"
+        }
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "detail": f"Ошибка при сегментации: {str(e)}",
+                "error_code": "SEGMENTATION_ERROR",
+            },
+        )
+
+
+@app.get(
+    "/segment/status",
+)
+async def get_segmentation_status():
+    """
+    Проверка статуса модели сегментации.
+    """
+    model = get_segmentation_model()
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    if model is not None:
+        return {
+            "status": "ready",
+            "model_loaded": True,
+            "device": device,
+            "checkpoint": MODEL_CHECKPOINT,
+            "message": "Модель готова к использованию"
+        }
+    else:
+        return {
+            "status": "not_loaded",
+            "model_loaded": False,
+            "device": device,
+            "checkpoint": MODEL_CHECKPOINT,
+            "message": "Модель не загружена. Обучите модель: python -m app.models.train"
+        }
+
